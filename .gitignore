@@ -1,0 +1,6 @@
+.vscode
+testdata/
+.DS_Store
+bitlocks.go
+radix-fuzz.zip
+corpus/

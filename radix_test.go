@@ -223,7 +223,7 @@ var urlDatabase [][]byte
 func loadTestFile(path string) (db [][]byte) {
 	f, err := os.Open(path)
 	if err != nil {
-		panic(err)
+		return nil
 	}
 	defer f.Close()
 	reader := bufio.NewReader(f)
@@ -248,6 +248,9 @@ func loadURLDatabase(t *testing.T) [][]byte {
 		return urlDatabase
 	}
 	urlDatabase = loadTestFile("testdata/DOI-2011.txt")
+	if urlDatabase == nil {
+		t.Skip("Testfile DOI-2011.txt not found")
+	}
 	return urlDatabase
 }
 

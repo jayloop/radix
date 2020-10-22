@@ -10,6 +10,9 @@ var workers = runtime.NumCPU()
 
 func treeInsert(b *testing.B, path string, num int) {
 	db := loadTestFile(path)
+	if db == nil {
+		b.Skipf("Testfile %s not found", path)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		buildTreeFromDB(db, num, false)
@@ -18,6 +21,9 @@ func treeInsert(b *testing.B, path string, num int) {
 
 func treeSearch(b *testing.B, path string) {
 	db := loadTestFile(path)
+	if db == nil {
+		b.Skipf("Testfile %s not found", path)
+	}
 	trie := buildTreeFromDB(db, runtime.NumCPU(), false)
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {

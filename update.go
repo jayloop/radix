@@ -171,6 +171,7 @@ searchLoop:
 					// We are going to change data at nodePtrOffset, which is inside the data block of parent
 					// We will copy all children of node (node data block must also be protected)
 					if !op.lock() {
+						runtime.Gosched()
 						goto S
 					}
 					op.kind = nodePrefixMiss
@@ -194,6 +195,7 @@ searchLoop:
 			a := atomic.LoadUint64(p)
 			if a == 0 {
 				if !op.lock() {
+					runtime.Gosched()
 					goto S
 				}
 				op.kind = nodeLeafInsert256
@@ -202,6 +204,7 @@ searchLoop:
 			}
 			if isLeaf(a) {
 				if !op.lock() {
+					runtime.Gosched()
 					goto S
 				}
 				op.kind = nodeLeafUpdate256
@@ -233,6 +236,7 @@ searchLoop:
 		if b == op.k {
 			if isLeaf(a) {
 				if !op.lock() {
+					runtime.Gosched()
 					goto S
 				}
 				op.kind = nodeLeafUpdate
@@ -246,6 +250,7 @@ searchLoop:
 		}
 
 		if !op.lock() {
+			runtime.Gosched()
 			goto S
 		}
 		op.kind = nodeLeafInsert

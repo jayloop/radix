@@ -188,6 +188,7 @@ searchLoop:
 
 					if isLeaf(otherChild) {
 						if !op.lock() {
+							runtime.Gosched()
 							goto S
 						}
 						if op.raw == root {
@@ -224,6 +225,7 @@ searchLoop:
 
 					// we need to lock this node + it's parent + the child node
 					if !op.lock3() {
+						runtime.Gosched()
 						goto S
 					}
 
@@ -244,6 +246,7 @@ searchLoop:
 				}
 				op.count = count
 				if !op.lock() {
+					runtime.Gosched()
 					goto S
 				}
 				op.kind = deleteLeaf

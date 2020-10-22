@@ -2,6 +2,7 @@ package radix
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -34,6 +35,8 @@ var debugOperationName = map[uint32]string{
 type UpdateOperation struct {
 	// points to key data used in call to PrepareUpdate
 	Key []byte
+	// the value of the found item, if any
+	Value uint64
 	// the key data fetched by the caller after call to PrepareUpdate (and before FinalizeUpdate)
 	FetchedKey []byte
 	// set true by caller if FetchedKey equals Key
@@ -93,9 +96,10 @@ func newUpdateOperation(idx *Tree, alloc *Allocator, releaseAlloc bool) (op *Upd
 	return
 }
 
-func (op *UpdateOperation) prepareUpdate(key []byte) (currentValue uint64) {
+func (op *UpdateOperation) prepareUpdate(key []byte) (found bool) {
 	op.Key = key
 	op.Match = false
+	op.Value = 0
 	op.FetchedKey = op.FetchedKey[:0]
 	op.allocator.startOp()
 S:
@@ -103,17 +107,17 @@ S:
 	if root == 0 {
 		// index is empty, lock root
 		if !op.idx.lockLeafRoot(root) {
-			atomic.AddUint64(&updateRestarts, 1)
+			runtime.Gosched()
 			goto S
 		}
 		op.k = key[0]
 		op.kind = replaceEmptyRootWithLeaf
-		return 0
+		return false
 	}
 	if isLeaf(root) {
 		// root is a leaf, acquire a root lock
 		if !op.idx.lockLeafRoot(root) {
-			atomic.AddUint64(&updateRestarts, 1)
+			runtime.Gosched()
 			goto S
 		}
 		op.k = key[0]
@@ -122,11 +126,12 @@ S:
 		if byte(root) == key[0] {
 			// key matches, this might be a hit, or we will have to insert a prefixed node here
 			op.kind = rootLeafUpdate
-			return getLeafValue(root)
+			op.Value = getLeafValue(root)
+			return true
 		}
 		// we should replace root with a node-2 with two leafs (no prefix)
 		op.kind = replaceLeafRootWithNode
-		return 0
+		return false
 	}
 
 	op.depth = 0
@@ -143,13 +148,11 @@ searchLoop:
 		op.nodeGen = op.idx.generation(op.node)
 		// now verify that the node has not been changed since we read it
 		if atomic.LoadUint64(op.nodePtr) != op.raw {
-			atomic.AddUint64(&updateRestarts, 1)
 			goto S
 		}
 		// in case the parent was changed while we where working through it the current node might now be disconnected
 		// so we check the current parent generation to safeguard against this.
 		if op.parent != 0 && op.parentGen != op.idx.generation(op.parent) {
-			atomic.AddUint64(&updateRestarts, 1)
 			goto S
 		}
 
@@ -168,13 +171,12 @@ searchLoop:
 					// We are going to change data at nodePtrOffset, which is inside the data block of parent
 					// We will copy all children of node (node data block must also be protected)
 					if !op.lock() {
-						atomic.AddUint64(&updateRestarts, 1)
 						goto S
 					}
 					op.kind = nodePrefixMiss
 					op.k = key[op.depth]
 					op.prefixMismatch = i
-					return 0
+					return false
 				}
 			}
 			data = data[op.prefixSlots:]
@@ -192,22 +194,21 @@ searchLoop:
 			a := atomic.LoadUint64(p)
 			if a == 0 {
 				if !op.lock() {
-					atomic.AddUint64(&updateRestarts, 1)
 					goto S
 				}
 				op.kind = nodeLeafInsert256
 				op.leafPtr = p
-				return 0
+				return false
 			}
 			if isLeaf(a) {
 				if !op.lock() {
-					atomic.AddUint64(&updateRestarts, 1)
 					goto S
 				}
 				op.kind = nodeLeafUpdate256
 				op.leafPtr = p
 				op.currentLeaf = a
-				return getLeafValue(a)
+				op.Value = getLeafValue(a)
+				return true
 			}
 			op.enterNode(p, a)
 			continue searchLoop
@@ -232,24 +233,23 @@ searchLoop:
 		if b == op.k {
 			if isLeaf(a) {
 				if !op.lock() {
-					atomic.AddUint64(&updateRestarts, 1)
 					goto S
 				}
 				op.kind = nodeLeafUpdate
 				op.leafPtr = p
 				op.currentLeaf = a
-				return getLeafValue(a)
+				op.Value = getLeafValue(a)
+				return true
 			}
 			op.enterNode(p, a)
 			continue searchLoop
 		}
 
 		if !op.lock() {
-			atomic.AddUint64(&updateRestarts, 1)
 			goto S
 		}
 		op.kind = nodeLeafInsert
-		return 0
+		return false
 	}
 }
 
@@ -264,7 +264,7 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 		updated = atomic.CompareAndSwapUint64(&op.idx.root, 0, buildLeaf(op.k, value))
 		op.idx.unlockRoot()
 		if updated {
-			atomic.AddUint64(&op.idx.liveObjects, 1)
+			op.allocator.itemCounter++
 		}
 
 	case replaceLeafRootWithNode:
@@ -273,7 +273,7 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 		updated = atomic.CompareAndSwapUint64((*uint64)(&op.idx.root), op.currentLeaf, buildNode(0, newNode, 2, 0))
 		op.idx.unlockRoot()
 		if updated {
-			atomic.AddUint64(&op.idx.liveObjects, 1)
+			op.allocator.itemCounter++
 		}
 
 	case rootLeafUpdate:
@@ -297,7 +297,7 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 				updateLeafKey(op.currentLeaf, op.FetchedKey[prefixLen]))
 			updated = atomic.CompareAndSwapUint64(&op.idx.root, op.currentLeaf, buildNode(0, newNode, 2, prefixLen))
 			if updated {
-				atomic.AddUint64(&op.idx.liveObjects, 1)
+				op.allocator.itemCounter++
 			}
 		}
 		op.idx.unlockRoot()
@@ -323,15 +323,13 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 
 		op.unlock()
 		op.allocator.recycle(op.node, op.count+op.prefixSlots)
-		atomic.AddUint64(&op.idx.liveObjects, 1)
-		atomic.AddUint64(&opNodePrefixMiss, 1)
+		op.allocator.itemCounter++
 		updated = true
 
 	case nodeLeafInsert256:
 		updated = atomic.CompareAndSwapUint64(op.leafPtr, 0, buildLeaf(op.k, value))
-		atomic.AddUint64(&opNode256leafInsert, 1)
 		if updated {
-			atomic.AddUint64(&op.idx.liveObjects, 1)
+			op.allocator.itemCounter++
 		}
 		op.unlock()
 
@@ -354,8 +352,7 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 			atomic.StoreUint64(op.nodePtr, v)
 			op.unlock()
 			op.allocator.recycle(op.node, op.count+op.prefixSlots)
-			atomic.AddUint64(&op.idx.liveObjects, 1)
-			atomic.AddUint64(&opNodeLeafInsert, 1)
+			op.allocator.itemCounter++
 			updated = true
 
 		} else {
@@ -380,8 +377,7 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 			op.unlock()
 			// recycle old node
 			op.allocator.recycle(op.node, op.count+op.prefixSlots)
-			atomic.AddUint64(&op.idx.liveObjects, 1)
-			atomic.AddUint64(&opNodeLeafInsert, 1)
+			op.allocator.itemCounter++
 			updated = true
 		}
 
@@ -408,10 +404,9 @@ func (op *UpdateOperation) Finalize(value uint64) (updated bool) {
 			)
 			updated = atomic.CompareAndSwapUint64((*uint64)(op.leafPtr), op.currentLeaf, buildNode(op.k, newNode, 2, prefixLen))
 			if updated {
-				atomic.AddUint64(&op.idx.liveObjects, 1)
+				op.allocator.itemCounter++
 			}
 		}
-		atomic.AddUint64(&opNodeLeafUpdate, 1)
 		op.unlock()
 	}
 	op.allocator.endOp()
@@ -435,6 +430,7 @@ func (op *UpdateOperation) Abort() {
 	if op.releaseAlloc {
 		op.idx.allocatorQueue.put(op.allocator.id)
 	}
+	//op.allocator.stats.updateRestarts += op.restarts
 	updateOperationPool.Put(op)
 }
 

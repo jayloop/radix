@@ -50,24 +50,28 @@ func (idx *Tree) Admin(out io.Writer, argv []string) {
 
 	case "blocks":
 		next := int(atomic.LoadUint64(&idx.nextFreeBlock))
+		t := table.New("BLOCK", "STATUS")
+		t.FormatHeader(table.Format(table.Yellow))
 		for i := 0; i <= next; i++ {
 			if i == next {
-				fmt.Fprintf(out, "block %d : allocated but not in use\n", i)
+				t.Row(i, "allocated")
 			} else {
-				fmt.Fprintf(out, "block %d : in use\n", i)
+				t.Row(i, "in use")
 			}
 		}
+		t.Print(out)
 
 	case "root":
 		root := atomic.LoadUint64(&idx.root)
 		if root == 0 {
 			fmt.Fprint(out, "Index is empty\n")
+			return
 		}
 		idx.debugPrintNode(out, root)
 
 	case "node":
 		if len(argv) != 2 {
-			fmt.Fprint(out, "Usage:\nnode <id>\n")
+			fmt.Fprint(out, "usage: node <id>\n")
 			return
 		}
 		node, _ := strconv.Atoi(argv[1])

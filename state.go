@@ -20,7 +20,7 @@ func (idx *Tree) writeState(out io.Writer) (int, error) {
 	written := 0
 
 	// write metadata: blocksize, number of blocks, number of allocators, root node location
-	n, err := out.Write([]byte(fmt.Sprintf("objects %d\nblocksize %d\nallocated_blocks %d\nallocators %d\nroot_node %d\nepoch %d\n", atomic.LoadUint64(&idx.liveObjects), blockSize, idx.nextFreeBlock, len(idx.allocators), atomic.LoadUint64(&idx.root), atomic.LoadUint64(idx.manager.globalEpoch))))
+	n, err := out.Write([]byte(fmt.Sprintf("objects %d\nblocksize %d\nallocated_blocks %d\nallocators %d\nroot_node %d\nepoch %d\n", atomic.LoadInt64(&idx.liveObjects), blockSize, idx.nextFreeBlock, len(idx.allocators), atomic.LoadUint64(&idx.root), atomic.LoadUint64(idx.manager.globalEpoch))))
 	if err != nil {
 		return 0, err
 	}
@@ -125,11 +125,9 @@ func (idx *Tree) loadState(data io.Reader) error {
 		space := bytes.IndexByte(line, ' ')
 		v, _ := strconv.ParseUint(string(line[space+1:]), 10, 64)
 
-		fmt.Printf("=> %s\n", line)
-
 		switch string(line[:space]) {
 		case "objects":
-			idx.liveObjects = v
+			idx.liveObjects = int64(v)
 
 		case "blocksize":
 			// in case loaded blocksize differs from existing ones, we need to throw away all blocks

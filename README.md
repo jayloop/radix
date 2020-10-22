@@ -21,11 +21,9 @@ As an example 17 million URL:s, with an average length of 60 bytes, can be index
 
 2. Max 55 bits are available for storing values associated with the inserted keys. The values could be offsets to permanent storage or compressed memory pointers.
 
-3. The 0 value can not be stored with a key (since a 0 return value means key not found).
+3. The tree accepts any []byte data as keys, but in case you want to use range or min/max searches, the key data needs to be binary comparable. For uint64 all you need to do is store them in big-endian order. For int64 the sign bit also needs to be flipped. ASCII strings are trivial, but floating point numbers requires more transformations. UTF8 is rather complex (see golang.org/x/text/collate).
 
-4. The tree accepts any []byte data as keys, but in case you want to use range or min/max searches, the key data needs to be binary comparable. For uint64 all you need to do is store them in big-endian order. For int64 the sign bit also needs to be flipped. ASCII strings are trivial, but floating point numbers requires more transformations. UTF8 is rather complex (see golang.org/x/text/collate).
-
-5. When indexing keys of variable length (like strings) the requirement is that no key may be the prefix of another key. A simple solution for this is to append a 0 byte on all keys (given 0 is not used within the keys).
+4. When indexing keys of variable length (like strings) the requirement is that no key may be the prefix of another key. A simple solution for this is to append a 0 byte on all keys (given 0 is not used within the keys).
 
 ## Installation
 

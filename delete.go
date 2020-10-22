@@ -2,6 +2,7 @@ package radix
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -27,6 +28,8 @@ var debugDeleteOperationName = map[uint32]string{
 // DeleteOperation represents the action to remove a key from the tree.
 // A delete operation is initiated through calling PrepareUpdate on a Tree or an Allocator
 type DeleteOperation struct {
+	// the value of the found item, if any
+	Value uint64
 	// FetchedKey is not used during a delete operation, but is provided as a convienance to the caller
 	// to avoid having to allocate a new slice for fetching the key (the DeleteOperation is pooled)
 	FetchedKey []byte
@@ -69,27 +72,29 @@ func newDeleteOperation(idx *Tree, alloc *Allocator, releaseAlloc bool) (op *Del
 	return
 }
 
-func (op *DeleteOperation) prepare(key []byte) (currentValue uint64) {
+func (op *DeleteOperation) prepare(key []byte) (found bool) {
 	op.FetchedKey = op.FetchedKey[:0]
+	op.Value = 0
 	op.allocator.startOp()
 S:
 	root := atomic.LoadUint64(&op.idx.root)
 	if root == 0 {
 		op.kind = notFound
-		return 0
+		return false
 	}
 	if isLeaf(root) {
 		if byte(root) == key[0] {
 			if !op.idx.lockLeafRoot(root) {
-				atomic.AddUint64(&deleteRestarts, 1)
+				runtime.Gosched()
 				goto S
 			}
 			op.kind = deleteRoot
 			op.raw = root
-			return getLeafValue(root)
+			op.Value = getLeafValue(root)
+			return true
 		}
 		op.kind = notFound
-		return 0
+		return false
 	}
 
 	op.nodePtr = &op.idx.root
@@ -106,13 +111,11 @@ searchLoop:
 		op.nodeGen = op.idx.generation(op.node)
 		// now verify that the node has not been changed since we read it
 		if atomic.LoadUint64(op.nodePtr) != op.raw {
-			atomic.AddUint64(&updateRestarts, 1)
 			goto S
 		}
 		// in case the parent was changed while we where working through it the current node might now be disconnected
 		// so we check the current parent generation to safeguard against this.
 		if op.parent != 0 && op.parentGen != op.idx.generation(op.parent) {
-			atomic.AddUint64(&updateRestarts, 1)
 			goto S
 		}
 
@@ -139,7 +142,7 @@ searchLoop:
 		}
 		if depth >= len(key) {
 			op.kind = notFound
-			return 0
+			return false
 		}
 
 		k := key[depth]
@@ -149,13 +152,14 @@ searchLoop:
 			a := atomic.LoadUint64(p)
 			if a == 0 {
 				op.kind = notFound
-				return 0
+				return false
 			}
 			if isLeaf(a) {
 				op.raw = a
 				op.leafPtr = p
 				op.kind = deleteLeaf256
-				return getLeafValue(a)
+				op.Value = getLeafValue(a)
+				return true
 			}
 			op.enterNode(p, a)
 			depth++
@@ -184,7 +188,6 @@ searchLoop:
 
 					if isLeaf(otherChild) {
 						if !op.lock() {
-							atomic.AddUint64(&deleteRestarts, 1)
 							goto S
 						}
 						if op.raw == root {
@@ -198,7 +201,8 @@ searchLoop:
 						}
 						op.count = count
 						op.kind = replaceNodeWithLeaf
-						return getLeafValue(a)
+						op.Value = getLeafValue(a)
+						return true
 					}
 
 					// otherChild is a node!
@@ -215,13 +219,11 @@ searchLoop:
 					op.childGen = op.idx.generation(op.child)
 					// verify it's still the same
 					if atomic.LoadUint64(otherChildPtr) != otherChild {
-						atomic.AddUint64(&deleteRestarts, 1)
 						goto S
 					}
 
 					// we need to lock this node + it's parent + the child node
 					if !op.lock3() {
-						atomic.AddUint64(&deleteRestarts, 1)
 						goto S
 					}
 
@@ -237,22 +239,23 @@ searchLoop:
 					op.prefix, op.prefixSlots = appendPrefix(op.prefix, op.data, childPrefixLen)
 
 					op.kind = replaceNodeWithNode
-					return getLeafValue(a)
+					op.Value = getLeafValue(a)
+					return true
 				}
 				op.count = count
 				if !op.lock() {
-					atomic.AddUint64(&deleteRestarts, 1)
 					goto S
 				}
 				op.kind = deleteLeaf
-				return getLeafValue(a)
+				op.Value = getLeafValue(a)
+				return true
 			}
 			op.enterNode(p, a)
 			depth++
 			continue searchLoop
 		}
 		op.kind = notFound
-		return 0
+		return false
 	}
 }
 
@@ -264,7 +267,7 @@ func (op *DeleteOperation) Finalize() (deleted bool) {
 	case deleteRoot:
 		atomic.StoreUint64(&op.idx.root, 0)
 		op.idx.unlockRoot()
-		atomic.AddUint64(&op.idx.liveObjects, ^uint64(0))
+		op.allocator.itemCounter--
 		deleted = true
 
 	case replaceNodeWithLeaf:
@@ -273,8 +276,7 @@ func (op *DeleteOperation) Finalize() (deleted bool) {
 		atomic.StoreUint64(op.nodePtr, op.newLeaf)
 		op.unlock()
 		op.allocator.recycle(op.node, op.count+op.prefixSlots)
-		atomic.AddUint64(&op.idx.liveObjects, ^uint64(0))
-		atomic.AddUint64(&opReplaceNodeLeaf, 1)
+		op.allocator.itemCounter--
 		deleted = true
 
 	case replaceNodeWithNode:
@@ -288,8 +290,7 @@ func (op *DeleteOperation) Finalize() (deleted bool) {
 		op.unlock3()
 		// recycle the old child node
 		op.allocator.recycle(op.child, op.count+op.prefixSlots)
-		atomic.AddUint64(&op.idx.liveObjects, ^uint64(0))
-		atomic.AddUint64(&opReplaceNodeNode, 1)
+		op.allocator.itemCounter--
 		deleted = true
 
 	case deleteLeaf:
@@ -308,8 +309,7 @@ func (op *DeleteOperation) Finalize() (deleted bool) {
 		op.unlock()
 		// recycle old node
 		op.allocator.recycle(op.node, op.count+op.prefixSlots)
-		atomic.AddUint64(&op.idx.liveObjects, ^uint64(0))
-		atomic.AddUint64(&opDeleteLeaf, 1)
+		op.allocator.itemCounter--
 		deleted = true
 
 	case deleteLeaf256:
@@ -318,8 +318,7 @@ func (op *DeleteOperation) Finalize() (deleted bool) {
 		// TODO(oscar): replace with a leaf when there is only one child left
 		deleted = atomic.CompareAndSwapUint64(op.leafPtr, op.raw, 0)
 		if deleted {
-			atomic.AddUint64(&op.idx.liveObjects, ^uint64(0))
-			atomic.AddUint64(&opDeleteLeaf256, 1)
+			op.allocator.itemCounter--
 		}
 	}
 	op.allocator.endOp()

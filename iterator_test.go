@@ -8,7 +8,7 @@ import (
 
 func TestIterator(t *testing.T) {
 	database := loadURLDatabase(t)
-	trie := buildTreeFromDB(t, database, runtime.NumCPU())
+	trie := buildTreeFromDB(database, runtime.NumCPU(), true)
 	// now iterate
 	var (
 		i     = trie.NewIterator(nil)
@@ -19,7 +19,7 @@ func TestIterator(t *testing.T) {
 	for i.Next() {
 		v := i.Value()
 		if _, ok := seen[v]; ok {
-			t.Logf("Failed: Key %s already seen during iteration\n", database[v-1])
+			t.Logf("Failed: Key %s already seen during iteration\n", database[v])
 			dup++
 		}
 		seen[v] = struct{}{}
@@ -49,7 +49,7 @@ func TestIterator(t *testing.T) {
 			count := 0
 			for i.Next() {
 				v := i.Value()
-				key := database[v-1]
+				key := database[v]
 				assertTrue(t, bytes.HasPrefix(key, []byte(tt.prefix)), "Prefix iteration returned a key without the search prefix")
 				count++
 			}

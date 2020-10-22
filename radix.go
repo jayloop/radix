@@ -11,13 +11,11 @@
 //
 // 2. Max 55 bits are available for storing values associated with the inserted keys. The values could be offsets to permanent storage or compressed memory pointers.
 //
-// 3. The 0 value can not be stored with a key (since a 0 return value means key not found).
-//
-// 4. The tree accepts any []byte data as keys, but in case you want to use range or min/max searches, the key data needs to be binary comparable.
+// 3. The tree accepts any []byte data as keys, but in case you want to use range or min/max searches, the key data needs to be binary comparable.
 // For uint64 all you need to do is store them in big-endian order. For int64 the sign bit also needs to be flipped.
 // ASCII strings are trivial, but floating point numbers requires more transformations. UTF8 is rather complex (see golang.org/x/text/collate).
 //
-// 5. When indexing keys of variable length (like strings) the requirement is that no key may be the prefix of another key. A simple solution for this is to append a 0 byte on all keys (given 0 is not used within the keys).
+// 4. When indexing keys of variable length (like strings) the requirement is that no key may be the prefix of another key. A simple solution for this is to append a 0 byte on all keys (given 0 is not used within the keys).
 //
 // Unsafe usage
 //
@@ -57,6 +55,9 @@ const (
 type nodeBlock struct {
 	data  []uint64
 	locks [locksPerBlock]int32
+
+	slotsReleased int64
+	slotsReused   int64
 }
 
 // Options are used when creating a new Tree.
@@ -83,9 +84,10 @@ type Tree struct {
 	blockMap     map[int]int
 	blockMapLock sync.RWMutex
 
-	liveObjects uint64
-
 	stopped int32
+
+	// this value is not guaranteed to be correct until the tree is still and all allocators have flushed their counters
+	liveObjects int64
 }
 
 func setDefaultOptions(options *Options) {
@@ -132,8 +134,15 @@ func NewTreeFromState(data io.Reader) (*Tree, error) {
 }
 
 // Len returns the current number of items in the tree
-func (idx *Tree) Len() int {
-	return int(atomic.LoadUint64(&idx.liveObjects))
+// It needs to query all allocators for their counters, so it will block if an allocator is constantly reserved...
+func (idx *Tree) Len() (count int) {
+	idx.Stop()
+	count = int(idx.liveObjects)
+	for _, a := range idx.allocators {
+		count += int(a.itemCounter)
+	}
+	idx.Start()
+	return
 }
 
 // Stop withdraws all allocators to prevent any more write or reads.
@@ -148,12 +157,6 @@ func (idx *Tree) Stop() {
 	}
 }
 
-// Close stops the index, and then terminates the memory allocation goroutine, which will otherwise leak.
-func (idx *Tree) Close() {
-	idx.Stop()
-	close(idx.done)
-}
-
 // Start releases all allocators withdrawn through a previous call to Stop.
 // In case the indexed is not stopped in returns silently.
 func (idx *Tree) Start() {
@@ -163,6 +166,12 @@ func (idx *Tree) Start() {
 	for i := 0; i < len(idx.allocators); i++ {
 		idx.allocatorQueue.put(i)
 	}
+}
+
+// Close stops the index, and then terminates the memory allocation goroutine, which will otherwise leak.
+func (idx *Tree) Close() {
+	idx.Stop()
+	close(idx.done)
 }
 
 // WriteState writes the state of a stopped index to the given writer.
@@ -243,19 +252,19 @@ func (idx *Tree) ReleaseAllocator(a *Allocator) {
 	idx.allocatorQueue.put(a.id)
 }
 
-// Lookup searches the tree for a key and if a candidate leaf is found returns the value stored there, otherwise 0.
+// Lookup searches the tree for a key and if a candidate leaf is found returns the value stored with it.
 // The caller needs to verify if the candidate is equal to the lookup key, since if the key didn't exist, the candidate
 // will be another key sharing a prefix with the lookup key.
-func (idx *Tree) Lookup(key []byte) (value uint64) {
+func (idx *Tree) Lookup(key []byte) (value uint64, found bool) {
 	id := idx.allocatorQueue.get()
-	value = idx.allocators[id].Lookup(key)
+	value, found = idx.allocators[id].Lookup(key)
 	idx.allocatorQueue.put(id)
 	return
 }
 
 // PrepareUpdate reserves an allocator and uses it to prepare an update operation.
 // See Allocator.PrepareUpdate for details
-func (idx *Tree) PrepareUpdate(key []byte) (v uint64, op *UpdateOperation) {
+func (idx *Tree) PrepareUpdate(key []byte) (found bool, op *UpdateOperation) {
 	id := idx.allocatorQueue.get()
 	op = newUpdateOperation(idx, idx.allocators[id], true)
 	return op.prepareUpdate(key), op
@@ -263,14 +272,14 @@ func (idx *Tree) PrepareUpdate(key []byte) (v uint64, op *UpdateOperation) {
 
 // PrepareDelete reserves an allocator and uses it to prepare a delete operation.
 // See Allocator.PrepareDelete for details
-func (idx *Tree) PrepareDelete(key []byte) (v uint64, op *DeleteOperation) {
+func (idx *Tree) PrepareDelete(key []byte) (found bool, op *DeleteOperation) {
 	id := idx.allocatorQueue.get()
 	op = newDeleteOperation(idx, idx.allocators[id], true)
-	v = op.prepare(key)
-	if v == 0 {
-		return 0, nil
+	if op.prepare(key) {
+		return true, op
 	}
-	return v, op
+	op.Abort()
+	return false, nil
 }
 
 func (idx *Tree) getNodeData(node uint64) []uint64 {
@@ -494,14 +503,14 @@ func (idx *Tree) Count(searchPrefix []byte) (nodes, leaves int) {
 	return NewCounter(idx).Count(searchPrefix)
 }
 
-func (idx *Tree) search(key []byte) uint64 {
+func (idx *Tree) search(key []byte) (uint64, bool) {
 	depth := 0
 	root := atomic.LoadUint64(&idx.root)
 	if isLeaf(root) {
 		if byte(root) == key[0] {
-			return getLeafValue(root)
+			return getLeafValue(root), true
 		}
-		return 0
+		return 0, false
 	}
 	_, node, count, prefixLen := explodeNode(root)
 searchLoop:
@@ -522,16 +531,16 @@ searchLoop:
 			data = data[prefixSlots:]
 		}
 		if depth >= len(key) {
-			return 0
+			return 0, false
 		}
 		k := key[depth]
 		if count >= fullAllocFrom {
 			a := atomic.LoadUint64(&data[int(k)])
 			if a == 0 {
-				return 0
+				return 0, false
 			}
 			if isLeaf(a) {
-				return getLeafValue(a)
+				return getLeafValue(a), true
 			}
 			_, node, count, prefixLen = explodeNode(a)
 			depth++
@@ -550,13 +559,13 @@ searchLoop:
 		}
 		if b == k {
 			if isLeaf(a) {
-				return getLeafValue(a)
+				return getLeafValue(a), true
 			}
 			_, node, count, prefixLen = explodeNode(a)
 			depth++
 			continue searchLoop
 		}
-		return 0
+		return 0, false
 	}
 }
 

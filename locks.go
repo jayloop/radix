@@ -7,7 +7,7 @@ import (
 // We use a generation locking where each data block has a number of int32 locks (typically 4096 locks for a 2MB block).
 // Nodes are associated with a lock based on the address of their first data slot.
 // A even value means unlocked, odd locked.
-// We increase by 1 when locking, and increase again when unlocking.
+// We increase by 1 when locking, and increase by 1 again when unlocking.
 // This way writers can check if a node might have been changed or detached since they accessed it, and restart their operations.
 
 func (idx *Tree) lockLeafRoot(expectedValue uint64) bool {
@@ -37,8 +37,8 @@ func (idx *Tree) isLocked(node uint64) bool {
 	return atomic.LoadInt32(&idx.blocks[block].locks[lock])&1 == 1
 }
 
-// lockNodes3 locks three nodes (parent node, node, child node). Parent may be zero. It returns true if successful.
-// After locking each nodes it verifies that the node has not been disconnected by checking the value of the pointers.
+// lockNodes3 locks three nodes (parent node, node, child node), given their generations have not changed.
+// Parent may be zero. It returns true if successful.
 func (idx *Tree) lockNodes3(child uint64, childGen int32, node uint64, nodeGen int32, parent uint64, parentGen int32) (locked bool) {
 	if parent == 0 {
 		return idx.lockNodes2(child, childGen, node, nodeGen)
@@ -79,7 +79,8 @@ func (idx *Tree) lockNodes3(child uint64, childGen int32, node uint64, nodeGen i
 	return true
 }
 
-// unlockNodes3 releases locks for three nodes. Parent may be zero, node and child must be non-zero.
+// unlockNodes3 releases locks for three nodes.
+// Parent may be zero, node and child must be non-zero.
 func (idx *Tree) unlockNodes3(child, node, parent uint64) {
 	if parent == 0 {
 		idx.unlockNodes2(child, node)
@@ -109,7 +110,8 @@ func (idx *Tree) unlockNodes3(child, node, parent uint64) {
 	}
 }
 
-// lockNodes2 locks node and parent
+// lockNodes2 locks node and parent, given their generations have not changed.
+// Parent may be zero. It returns true if successful.
 func (idx *Tree) lockNodes2(node uint64, nodeGen int32, parent uint64, parentGen int32) bool {
 	if parent == 0 {
 		return idx.lockNode(node, nodeGen)
@@ -137,7 +139,7 @@ func (idx *Tree) lockNodes2(node uint64, nodeGen int32, parent uint64, parentGen
 	return true
 }
 
-// unlockNodes2 unlock node and parent by incrementing the generational lock, an even value means unlocked
+// unlockNodes2 unlocks node and parent.
 func (idx *Tree) unlockNodes2(node uint64, parent uint64) {
 	if parent == 0 {
 		idx.unlockNode(node)
@@ -159,7 +161,7 @@ func (idx *Tree) unlockNodes2(node uint64, parent uint64) {
 	}
 }
 
-//func (idx *Tree) lockNode(node uint64, value uint64, gen int32, ptr *uint64) bool {
+// lockNode locks node given it's generation has not changed.
 func (idx *Tree) lockNode(node uint64, gen int32) bool {
 	if gen&1 == 1 {
 		return false
@@ -167,13 +169,9 @@ func (idx *Tree) lockNode(node uint64, gen int32) bool {
 	block := node >> blockSlotsShift
 	lock := node & lockOffsetMask
 	return atomic.CompareAndSwapInt32(&idx.blocks[block].locks[lock], gen, gen+1)
-	// if atomic.LoadUint64(ptr) != value {
-	// 	panic("Verify node failed\n")
-	// 	atomic.AddInt32(&idx.blocks[block].locks[lock], -1)
-	// 	return false
-	// }
 }
 
+// unlockNode unlocks node.
 func (idx *Tree) unlockNode(node uint64) {
 	block := node >> blockSlotsShift
 	lock := node & lockOffsetMask

@@ -40,6 +40,14 @@ type Allocator struct {
 	globalEpoch *uint64
 	reserveSlot *uint64
 	counter     uint64
+
+	// the local item counter, could be negative
+	itemCounter int64
+
+	stats *OperationStats
+
+	// cache padding
+	_ [8]uint64
 }
 
 type recycledItem struct {
@@ -62,20 +70,27 @@ func newAllocator(idx *Tree, id int, blocksize uint64, newBlocks chan int) *Allo
 		blockSize:   blocksize,
 		recycler:    make([][]recycledItem, 258),
 		newBlocks:   newBlocks,
+		stats:       new(OperationStats),
 	}
 }
 
-// Unused reports the number of bytes unused in the current block
-func (a *Allocator) Unused() (bytes int) {
+// FlushStats updates tree global stats with the allocators private counters.
+func (a *Allocator) FlushStats() {
+	atomic.AddInt64(&a.idx.liveObjects, a.itemCounter)
+	a.itemCounter = 0
+}
+
+// unused reports the number of bytes unused in the current block
+func (a *Allocator) unused() (bytes int) {
 	return int(a.blockSize - a.nextFree)
 }
 
-// Lookup searches the tree for a key and if a candidate leaf is found returns the value stored there, otherwise 0.
+// Lookup searches the tree for a key and if a candidate leaf is found returns the value stored with it.
 // The caller needs to verify that the candidate is equal to the lookup key, since if the key didn't exist, the candidate
 // will be another key sharing a prefix with the lookup key.
-func (a *Allocator) Lookup(key []byte) (value uint64) {
+func (a *Allocator) Lookup(key []byte) (value uint64, found bool) {
 	a.startOp()
-	value = a.idx.search(key)
+	value, found = a.idx.search(key)
 	a.endOp()
 	return
 }
@@ -114,7 +129,7 @@ func (a *Allocator) Lookup(key []byte) (value uint64) {
 //    }
 //  }
 //
-func (a *Allocator) PrepareUpdate(key []byte) (v uint64, op *UpdateOperation) {
+func (a *Allocator) PrepareUpdate(key []byte) (found bool, op *UpdateOperation) {
 	op = newUpdateOperation(a.idx, a, false)
 	return op.prepareUpdate(key), op
 }
@@ -145,14 +160,14 @@ func (a *Allocator) PrepareUpdate(key []byte) (v uint64, op *UpdateOperation) {
 //    }
 //  }
 //
-func (a *Allocator) PrepareDelete(key []byte) (v uint64, op *DeleteOperation) {
+func (a *Allocator) PrepareDelete(key []byte) (found bool, op *DeleteOperation) {
 	op = newDeleteOperation(a.idx, a, false)
-	v = op.prepare(key)
-	if v == 0 {
-		op.Abort()
-		return 0, nil
+	if op.prepare(key) {
+		return true, op
 	}
-	return v, op
+	op.Abort()
+	return false, nil
+
 }
 
 // startOp fetches the current global epoch and makes an allocator specific reservation with this epoch, meaning that only memory blocks recycled before this epoch are safe to reuse.
@@ -175,8 +190,9 @@ func (a *Allocator) recycle(node uint64, slots int) {
 	if a.counter >= 1000 {
 		atomic.AddUint64(a.globalEpoch, 1)
 		a.counter = 0
+		a.FlushStats()
 	}
-	atomic.AddUint64(&nodesReleased, 1)
+	//a.slotsReleased += uint64(slots)
 }
 
 func (a *Allocator) printStats(out io.Writer, i int) {
@@ -204,13 +220,14 @@ func (a *Allocator) newNode(slots int) (n uint64) {
 					n = item.n
 					a.recycler[t][i] = a.recycler[t][l-1]
 					a.recycler[t] = a.recycler[t][:l-1]
+
 					unusedSlots := t - slots
 					if unusedSlots >= 2 {
 						n2 := n + uint64(slots)
 						a.recycler[unusedSlots] = append(a.recycler[unusedSlots], recycledItem{n2, item.e})
-						atomic.AddUint64(&nodesReleased, 1)
+						//a.slotsReleased += uint64(unusedSlots)
 					}
-					atomic.AddUint64(&nodesReused, 1)
+					//a.slotsReused += uint64(slots)
 					return n
 				}
 			}
@@ -239,7 +256,7 @@ func (a *Allocator) allocateNode(slots int) (n uint64) {
 		a.nextFree = uint64(slots) * 8
 		a.empty = false
 	}
-	atomic.AddUint64(&nodesAllocated, 1)
+	//a.slotsAllocated += uint64(slots)
 	return
 }
 

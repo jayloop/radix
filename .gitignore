@@ -4,3 +4,4 @@ testdata/
 bitlocks.go
 radix-fuzz.zip
 corpus/
+.txt

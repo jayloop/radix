@@ -1,6 +1,9 @@
 package radix
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 type counterPosition struct {
 	raw       uint64
@@ -10,17 +13,22 @@ type counterPosition struct {
 // A Counter counts objects in a Tree
 type Counter struct {
 	NodesWithPrefix   int
+	NodeSizes         []int
 	TotalPrefixLength int
 	TotalPrefixBytes  int
 	LargePrefixes     int
-	Node256           int
-	idx               *Tree
-	stack             []counterPosition
+	Elapsed           time.Duration
+
+	idx   *Tree
+	stack []counterPosition
 }
 
 // NewCounter returns a counter on tree
 func NewCounter(tree *Tree) *Counter {
-	return &Counter{idx: tree}
+	return &Counter{
+		idx:       tree,
+		NodeSizes: make([]int, 257),
+	}
 }
 
 func (c *Counter) reset() {
@@ -29,11 +37,14 @@ func (c *Counter) reset() {
 	c.TotalPrefixLength = 0
 	c.TotalPrefixBytes = 0
 	c.LargePrefixes = 0
-	c.Node256 = 0
+	for i := range c.NodeSizes {
+		c.NodeSizes[i] = 0
+	}
 }
 
 // Count counts nodes and leaves having the given prefix which may be empty
 func (c *Counter) Count(searchPrefix []byte) (nodes, leaves int) {
+	start := time.Now()
 	c.reset()
 	alloc := c.idx.GetAllocator()
 	defer c.idx.ReleaseAllocator(alloc)
@@ -68,9 +79,7 @@ searchLoop:
 			data = data[prefixSlots:]
 		}
 
-		if count == 256 {
-			c.Node256++
-		}
+		c.NodeSizes[count]++
 
 		for k := p.nextChild; k < count; k++ {
 			a := atomic.LoadUint64(&data[k])
@@ -103,5 +112,6 @@ searchLoop:
 		p, c.stack = c.stack[len(c.stack)-1], c.stack[:len(c.stack)-1]
 	}
 
+	c.Elapsed = time.Since(start)
 	return nodes, leaves
 }

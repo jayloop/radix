@@ -435,7 +435,6 @@ func (op *UpdateOperation) Abort() {
 	if op.releaseAlloc {
 		op.idx.allocatorQueue.put(op.allocator.id)
 	}
-	//op.allocator.stats.updateRestarts += op.restarts
 	updateOperationPool.Put(op)
 }
 

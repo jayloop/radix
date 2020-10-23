@@ -4,13 +4,6 @@ import (
 	"sync/atomic"
 )
 
-type OperationStats struct {
-	slotsAllocated uint64
-	slotsReleased  uint64
-	slotsReused    uint64
-	_              [8]uint64
-}
-
 // Stats updates the given map with tree info and operation stats
 func (idx *Tree) Stats(stats map[string]interface{}) {
 	liveObjects := atomic.LoadInt64(&idx.liveObjects)
@@ -29,10 +22,4 @@ func (idx *Tree) Stats(stats map[string]interface{}) {
 	stats["root_node"] = atomic.LoadUint64(&idx.root)
 
 	stats["current_epoch"] = atomic.LoadUint64(idx.manager.globalEpoch)
-}
-
-func (a *Allocator) Stats(stats map[string]interface{}) {
-	stats["slots_allocated"] = a.stats.slotsAllocated
-	stats["slots_released"] = a.stats.slotsReleased
-	stats["slots_reused"] = a.stats.slotsReused
 }

@@ -44,8 +44,6 @@ type Allocator struct {
 	// the local item counter, could be negative
 	itemCounter int64
 
-	stats *OperationStats
-
 	// cache padding
 	_ [8]uint64
 }
@@ -70,7 +68,6 @@ func newAllocator(idx *Tree, id int, blocksize uint64, newBlocks chan int) *Allo
 		blockSize:   blocksize,
 		recycler:    make([][]recycledItem, 258),
 		newBlocks:   newBlocks,
-		stats:       new(OperationStats),
 	}
 }
 

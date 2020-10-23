@@ -92,35 +92,35 @@ func (a *Allocator) Lookup(key []byte) (value uint64, found bool) {
 	return
 }
 
-// PrepareUpdate prepares an update operation for the given key. It returns the present value found while searching for the key
+// PrepareUpdate prepares an update operation for the given key. It returns if it did find a key candidate
 // and an UpdateOperation used to finalize or abort the operation.
-// If the present value is 0 it's a simple insert operation:
+// If not found it's a simple insert operation:
 //
-//  v, op := a.PrepareUpdate([]byte("hello"))
-//  if v == 0 {
+//  found, op := a.PrepareUpdate([]byte("hello"))
+//  if !found {
 //      // this is an insert
-//      if inserted := op.Finalize(3); !inserted {
+//      if inserted := op.Finalize(NEW_VALUE); !inserted {
 //         // write conflict, we need to restart with a new PrepareUpdate
 //      }
 //  }
 //
-// If the value is non-zero the caller must fetch the full key for this value into the op.FetchedKey field. The caller should compare this value
+// If a key candidate is found the caller must fetch the full key for op.Value into the op.FetchedKey field. The caller should compare this value
 // to the update key (op.Key) and set op.Match accordingly before finalizing.
 // Since operation structs are pooled it's best to reuse the slice at op.FetchedKey.
 //
-//  if v != 0 {
-//    op.FetchedKey = fetchKeyFromSomeStorage(op.FetchedKey[:0], v)
+//  if found {
+//    op.FetchedKey = fetchKeyFromSomeStorage(op.FetchedKey[:0], op.Value)
 //    if bytes.Equal(op.Key, op.FetchedKey) {
 //       // this is an update
 //       // do some update logic
 //       op.Match = true
-//       if updated := op.Finalize(3); !updated {
+//       if updated := op.Finalize(NEW_VALUE); !updated {
 //          // write conflict, we need to restart with a new PrepareUpdate
 //       }
 //    } else {
 //      // this is an insert
 //      // do some insert logic
-//      if inserted := op.Finalize(3); !inserted {
+//      if inserted := op.Finalize(NEW_VALUE); !inserted {
 //          // write conflict, we need to restart with a new PrepareUpdate
 //      }
 //    }
@@ -131,21 +131,21 @@ func (a *Allocator) PrepareUpdate(key []byte) (found bool, op *UpdateOperation) 
 	return op.prepareUpdate(key), op
 }
 
-// PrepareDelete prepares an delete operation on the given key. It returns the present value found while searching for the key
+// PrepareDelete prepares an delete operation on the given key. It returns if it did find a candidate key
 // and an DeleteOperation used to finalize or abort the operation.
-// If returns a nil op if and only if v is 0. In this case there is nothing to delete.
+// If returns a nil op if and only if found is false. In this case there is nothing to delete.
 //
-//  v, op := a.PreparDelete([]byte("hello"))
-//  if v == 0 {
+//  found, op := a.PreparDelete([]byte("hello"))
+//  if !found {
 //      // key didn't exist
 //  }
 //
-// If the value is non-zero the caller must fetch the full key for this value into the op.FetchedKey field. The caller should compare this value
+// If a candidate is found the caller must fetch the full key for op.Value into the op.FetchedKey field. The caller should compare this value
 // to the update key (op.Key) to verify we are deleting the right key. If they don't match, call op.Abort.
 // Since operation structs are pooled it's best to reuse the slice at op.FetchedKey.
 //
-//  if v != 0 {
-//    op.FetchedKey = fetchKeyFromSomeStorage(op.FetchedKey[:0], v)
+//  if found {
+//    op.FetchedKey = fetchKeyFromSomeStorage(op.FetchedKey[:0], op.Value)
 //    if bytes.Equal(op.Key, op.FetchedKey) {
 //       // it was a match, go ahead with delete
 //       if deleted := op.Finalize(); !deleted {

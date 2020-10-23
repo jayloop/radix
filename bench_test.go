@@ -9,7 +9,7 @@ import (
 var workers = runtime.NumCPU()
 
 func treeInsert(b *testing.B, path string, num int) {
-	db := loadTestFile(path)
+	db, bytes := loadTestFile(path, 0)
 	if db == nil {
 		b.Skipf("Testfile %s not found", path)
 	}
@@ -17,10 +17,11 @@ func treeInsert(b *testing.B, path string, num int) {
 	for i := 0; i < b.N; i++ {
 		buildTreeFromDB(db, num, false)
 	}
+	b.SetBytes(bytes)
 }
 
 func treeSearch(b *testing.B, path string) {
-	db := loadTestFile(path)
+	db, _ := loadTestFile(path, 0)
 	if db == nil {
 		b.Skipf("Testfile %s not found", path)
 	}
@@ -76,6 +77,7 @@ func BenchmarkInteger50MSparse(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		buildTreeFromDB(db, workers, false)
 	}
+	b.SetBytes(50000000 * 8)
 }
 
 func BenchmarkInteger50MDense(b *testing.B) {
@@ -85,6 +87,7 @@ func BenchmarkInteger50MDense(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		buildTreeFromDB(db, workers, false)
 	}
+	b.SetBytes(50000000 * 8)
 }
 
 func BenchmarkInteger10MDense(b *testing.B) {
@@ -94,6 +97,7 @@ func BenchmarkInteger10MDense(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		buildTreeFromDB(db, workers, false)
 	}
+	b.SetBytes(10000000 * 8)
 }
 
 func BenchmarkInteger10MSparse(b *testing.B) {
@@ -103,4 +107,5 @@ func BenchmarkInteger10MSparse(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		buildTreeFromDB(db, workers, false)
 	}
+	b.SetBytes(10000000 * 8)
 }

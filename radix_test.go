@@ -38,14 +38,16 @@ func TestInteger10MDense(t *testing.T) {
 	testSliceDatabaseN(t, N, fillIntegers(N))
 }
 
-func TestRepeatedBuild(t *testing.T) {
+func TestRepeatedInsertDelete(t *testing.T) {
 	db := loadURLDatabase(t)
 	db = db[:10000]
+	num := runtime.NumCPU()
+	trie := NewTree(nil)
 	for i := 0; i < 100; i++ {
-		trie := buildTreeFromDB(db, 8, true)
-		lookupAll(t, trie, db, 8)
+		insertAll(trie, db, num, true)
+		lookupAll(t, trie, db, num)
 		countAll(t, trie)
-		deleteAll(t, trie, db, 8)
+		deleteAll(t, trie, db, num)
 	}
 }
 
@@ -87,7 +89,7 @@ func countAll(t *testing.T, trie *Tree) {
 	c := NewCounter(trie)
 	nodes, leaves := c.Count(nil)
 	stop := time.Since(start)
-	fmt.Printf("%d leaves and %d nodes counted in %v (nodes with prefix %d, total prefix bytes: %d, node256: %d)\n", leaves, nodes, stop, c.NodesWithPrefix, c.TotalPrefixBytes, c.Node256)
+	fmt.Printf("%d leaves and %d nodes counted in %v (nodes with prefix %d, total prefix bytes: %d)\n", leaves, nodes, stop, c.NodesWithPrefix, c.TotalPrefixBytes)
 	assertTrue(t, leaves == trie.Len())
 }
 
@@ -95,6 +97,11 @@ func buildTreeFromDB(database [][]byte, num int, bench bool) *Tree {
 	trie := NewTree(&Options{
 		NumAllocators: num,
 	})
+	insertAll(trie, database, num, bench)
+	return trie
+}
+
+func insertAll(trie *Tree, database [][]byte, num int, bench bool) {
 	var (
 		start = time.Now()
 		wg    sync.WaitGroup
@@ -137,7 +144,6 @@ func buildTreeFromDB(database [][]byte, num int, bench bool) *Tree {
 	if bench {
 		fmt.Printf("%d inserts in %v. %.2f M per second\n", N, stop, float64(N)/stop.Seconds()/1000000)
 	}
-	return trie
 }
 
 func lookupAll(t *testing.T, trie *Tree, database [][]byte, num int) {
@@ -218,12 +224,22 @@ func deleteAll(t *testing.T, trie *Tree, database [][]byte, num int) {
 	}
 }
 
-var urlDatabase [][]byte
+var (
+	testFiles     = make(map[string][][]byte)
+	testFileBytes = make(map[string]int64)
+)
 
-func loadTestFile(path string) (db [][]byte) {
+func loadTestFile(path string, expectedSize int) (db [][]byte, bytes int64) {
+	if db, ok := testFiles[path]; ok {
+		return db, testFileBytes[path]
+	}
+	if expectedSize > 0 {
+		// preallocate to avoid repeated slice capacity growth
+		db = make([][]byte, 0, expectedSize)
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	defer f.Close()
 	reader := bufio.NewReader(f)
@@ -239,19 +255,19 @@ func loadTestFile(path string) (db [][]byte) {
 		key := make([]byte, len(row)+1)
 		copy(key, row)
 		db = append(db, key)
+		bytes += int64(len(key))
 	}
+	testFiles[path] = db
+	testFileBytes[path] = bytes
 	return
 }
 
 func loadURLDatabase(t *testing.T) [][]byte {
-	if urlDatabase != nil {
-		return urlDatabase
-	}
-	urlDatabase = loadTestFile("testdata/DOI-2011.txt")
-	if urlDatabase == nil {
+	db, _ := loadTestFile("testdata/DOI-2011.txt", 17000000)
+	if db == nil {
 		t.Skip("Testfile DOI-2011.txt not found")
 	}
-	return urlDatabase
+	return db
 }
 
 func BenchmarkMinReservation(b *testing.B) {

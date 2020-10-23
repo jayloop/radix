@@ -29,7 +29,6 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 )
 
 const (
@@ -314,8 +313,11 @@ func (idx *Tree) getNodeFromRaw(raw uint64) (count, prefixLen int, data []uint64
 
 func (idx *Tree) partialSearch(searchPrefix []byte) (raw uint64, depth int) {
 	root := atomic.LoadUint64(&idx.root)
+	if len(searchPrefix) == 0 {
+		return root, 0
+	}
 	if isLeaf(root) {
-		if len(searchPrefix) == 0 || byte(root) == searchPrefix[0] {
+		if byte(root) == searchPrefix[0] {
 			return root, 0
 		}
 		return 0, 0
@@ -388,16 +390,17 @@ searchLoop:
 
 // MaxKey returns the maximum key having the given searchPrefix, or the maximum key in the whole index if searchIndex is nil.
 // Maximum means the last key in the lexicographic order. If keys are uint64 in BigEndian it is also the largest number.
-//
+// If ok is false the index is empty.
+
 // For example, if we store temperature readings using the key "temp_TIMESTAMP" where timestamp is an 8 byte BigEndian ns timestamp
 // MaxKey([]byte("temp_")) returns the last made reading.
-func (idx *Tree) MaxKey(searchPrefix []byte) uint64 {
+func (idx *Tree) MaxKey(searchPrefix []byte) (v uint64, ok bool) {
 	raw, _ := idx.partialSearch(searchPrefix)
 	if raw == 0 {
-		return 0
+		return 0, false
 	}
 	if isLeaf(raw) {
-		return getLeafValue(raw)
+		return getLeafValue(raw), true
 	}
 	// now find the max
 searchLoop:
@@ -405,37 +408,36 @@ searchLoop:
 		_, node, count, prefixLen := explodeNode(raw)
 		block := int(node >> blockSlotsShift)
 		offset := int(node & blockSlotsOffsetMask)
-		ptr := unsafe.Pointer(&idx.blocks[block].data[offset])
-		var prefixAdd int
+		data := idx.blocks[block].data[offset:]
+		var prefixSlots int
 		if prefixLen > 0 {
 			if prefixLen == 255 {
-				prefixLen = int(*(*uint16)(ptr))
-				prefixAdd = ((prefixLen + 9) >> 3) << 3
+				prefixLen = int(data[0])
+				prefixSlots = (prefixLen + 15) >> 3
 			} else {
-				prefixAdd = ((prefixLen + 7) >> 3) << 3
+				prefixSlots = (prefixLen + 7) >> 3
 			}
+			data = data[prefixSlots:]
 		}
 		if count >= fullAllocFrom {
 			// find max, iterate from top
-			p := uintptr(prefixAdd + 8*int(255))
 			for k := 255; k >= 0; k-- {
-				a := atomic.LoadUint64((*uint64)(unsafe.Pointer(uintptr(ptr) + p)))
+				a := atomic.LoadUint64(&data[k])
 				if a != 0 {
 					if isLeaf(a) {
-						return getLeafValue(a)
+						return getLeafValue(a), true
 					}
 					raw = a
 					continue searchLoop
 				}
-				p += 8
 			}
-			return 0 // in the case node is broken...
+			// BUG: this might happen if all children in the node has been deleted, since we currently don't shrink node-256. we should go back in the tree!
+			return 0, false
 		}
-		// load top child (since they are ordered)
-		p := uintptr(prefixAdd) + 8*uintptr(count-1)
-		a := atomic.LoadUint64((*uint64)(unsafe.Pointer(uintptr(ptr) + p)))
+		// load the last child (since they are ordered)
+		a := atomic.LoadUint64(&data[count-1])
 		if isLeaf(a) {
-			return getLeafValue(a)
+			return getLeafValue(a), true
 		}
 		raw = a
 	}
@@ -443,51 +445,51 @@ searchLoop:
 
 // MinKey returns the minimum key having the given searchPrefix, or the minimum key in the whole index if searchIndex is nil.
 // Minimum means the first key in the lexicographic order. If keys are uint64 in BigEndian it is also the smallest number.
-func (idx *Tree) MinKey(searchPrefix []byte) uint64 {
+// If ok is false the index is empty.
+func (idx *Tree) MinKey(searchPrefix []byte) (v uint64, ok bool) {
 	raw, _ := idx.partialSearch(searchPrefix)
 	if raw == 0 {
-		return 0
+		return 0, false
 	}
 	if isLeaf(raw) {
-		return getLeafValue(raw)
+		return getLeafValue(raw), true
 	}
-	// now find the max
+	// now find the min
 searchLoop:
 	for {
 		_, node, count, prefixLen := explodeNode(raw)
 		block := int(node >> blockSlotsShift)
 		offset := int(node & blockSlotsOffsetMask)
-		ptr := unsafe.Pointer(&idx.blocks[block].data[offset])
-		var prefixAdd int
+		data := idx.blocks[block].data[offset:]
+		var prefixSlots int
 		if prefixLen > 0 {
 			if prefixLen == 255 {
-				prefixLen = int(*(*uint16)(ptr))
-				prefixAdd = ((prefixLen + 9) >> 3) << 3
+				prefixLen = int(data[0])
+				prefixSlots = (prefixLen + 15) >> 3
 			} else {
-				prefixAdd = ((prefixLen + 7) >> 3) << 3
+				prefixSlots = (prefixLen + 7) >> 3
 			}
+			data = data[prefixSlots:]
 		}
 		if count >= fullAllocFrom {
 			// find min, iterate from bottom
-			p := uintptr(prefixAdd)
-			for k := 0; k < 256; k++ {
-				a := atomic.LoadUint64((*uint64)(unsafe.Pointer(uintptr(ptr) + p)))
+			for k := range data[:count] {
+				a := atomic.LoadUint64(&data[k])
 				if a != 0 {
 					if isLeaf(a) {
-						return getLeafValue(a)
+						return getLeafValue(a), true
 					}
 					raw = a
 					continue searchLoop
 				}
-				p += 8
 			}
-			return 0 // in the case node is broken...
+			// BUG: this might happen if all children in the node has been deleted, since we currently don't shrink node-256. we should go back in the tree!
+			return 0, false
 		}
-		// load bottom child (since they are ordered)
-		p := uintptr(prefixAdd)
-		a := atomic.LoadUint64((*uint64)(unsafe.Pointer(uintptr(ptr) + p)))
+		// load first child (since they are ordered)
+		a := atomic.LoadUint64(&data[0])
 		if isLeaf(a) {
-			return getLeafValue(a)
+			return getLeafValue(a), true
 		}
 		raw = a
 	}

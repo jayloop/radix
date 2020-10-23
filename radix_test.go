@@ -51,19 +51,31 @@ func TestRepeatedInsertDelete(t *testing.T) {
 	}
 }
 
-func testSliceDatabaseN(t *testing.T, N int, database [][]byte) {
+func testSliceDatabaseN(t *testing.T, N int, db [][]byte) {
 	num := runtime.NumCPU()
+	trie := buildTreeFromDB(db, num, true)
+	trie.Admin(os.Stdout, []string{"info"})
 
-	// --- Build ---
-	trie := buildTreeFromDB(database, num, true)
-
-	// --- Lookup ---
-	lookupAll(t, trie, database, num)
-
-	// --- Count ---
+	lookupAll(t, trie, db, num)
 	countAll(t, trie)
+	iterateAll(t, trie)
+	testMinMax(t, trie, db)
 
-	// --- Iterate ---
+	deleteAll(t, trie, db, num)
+	trie.Admin(os.Stdout, []string{"info"})
+	trie.Close()
+}
+
+func testMinMax(t *testing.T, trie *Tree, db [][]byte) {
+	min, ok := trie.MinKey(nil)
+	assertTrue(t, ok)
+	max, ok := trie.MaxKey(nil)
+	assertTrue(t, ok)
+	fmt.Printf("Min key : %x, Max key : %x\n", db[min], db[max])
+	assertTrue(t, bytes.Compare(db[min], db[max]) == -1)
+}
+
+func iterateAll(t *testing.T, trie *Tree) {
 	start := time.Now()
 	i := trie.NewIterator(nil)
 	count := 0
@@ -74,14 +86,6 @@ func testSliceDatabaseN(t *testing.T, N int, database [][]byte) {
 	stop := time.Since(start)
 	fmt.Printf("%d items iterated in %v. %.2f M per second\n", count, stop, float64(count)/stop.Seconds()/1000000)
 	assertTrue(t, count == trie.Len())
-
-	trie.Admin(os.Stdout, []string{"info"})
-
-	// --- Delete ---
-	deleteAll(t, trie, database, num)
-	trie.Admin(os.Stdout, []string{"info"})
-
-	trie.Close()
 }
 
 func countAll(t *testing.T, trie *Tree) {
